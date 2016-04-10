@@ -2,27 +2,20 @@
 
 VERSION="0.0.1"
 LOGFILE="/tmp/$LOGNAME_`date +%s`.hash"
-if [ -f "`which md5`" ]; then
-  MD5="`which md5`"
-elif [ -f "`which md5sum`" ]; then
-  MD5="`which md5sum`"
-else
-  echo MD5 is mandatory. Exiting...
-  sleep 1
-  
-  exit 2
-fi
+TYPESFILE="$LOGFILE.types"
+SLEEP=1
 
 if [ -n "$1" ]; then
   if [ $1 == "-h" -o $1 == "--help" ]; then
     cat << EOF
 Script that monitors a directory for any change
 
-Usage: ./monitor.sh [option] directory
+Usage: ./monitor.sh [option] directory [sleep]
 
 Options:
-  -h, --help  prints this message
-  -v, --version prints version
+  -h, --help      prints this message
+  -v, --version   prints version
+  sleep           delay time for checking the provided directory
 EOF
     exit 2
   elif [ $1 == "-v" -o $1 == "--version" ]; then
@@ -38,48 +31,98 @@ else
     exit 2
 fi
 
+if [ -n "$2" ]; then
+  if ! [[ "$2" =~ ^[0-9]+$ ]] ; then
+    echo The sleep time should be a number
+    exit 2
+  fi
+  SLEEP=$2
+fi
+
 function exit_process() {
   echo Exiting!
-  
-  rm $LOGFILE
 
-  exit 1
+  if [ -e $LOGFILE ]; then
+    rm $LOGFILE
+  fi
+  
+  if [ -e $TYPESFILE ]; then
+    rm $TYPESFILE
+  fi
+
+  for job in $(jobs -p); do
+    kill $job
+  done
+
+  exit 0
+}
+
+function add() {
+  find $1 > $LOGFILE.add
+
+  while true; do
+    find $1 > $LOGFILE.add.tmp
+
+    while IFS='' read -r path || [[ -n "$path" ]]; do
+      if ! grep -qxF "$path" $LOGFILE.add; then
+        if [ -f $path ]; then
+          echo New file: $path
+        else
+          echo New directory: $path
+        fi
+      fi
+    done < $LOGFILE.add.tmp
+   
+    if [ -e $LOGFILE.add.tmp ]; then
+      mv $LOGFILE.add.tmp $LOGFILE.add
+    fi
+
+    sleep $SLEEP
+  done
+}
+
+function remove() {
+  find $1 > $LOGFILE.remove
+  find $1 -exec file -b {} \; > $TYPESFILE
+
+  while true; do
+    find $1 > $LOGFILE.remove.tmp
+    find $1 -exec file -b {} \; > $TYPESFILE.tmp
+
+    while IFS='' read -r path || [[ -n "$path" ]]; do
+      if ! grep -qxF "$path" $LOGFILE.remove.tmp; then
+
+        line="`grep -nF -m 1 "$path" $LOGFILE.remove | cut -d : -f 1`p"
+
+        filetype=$(sed -n "$line" $TYPESFILE)
+
+        if [ "$filetype" == "directory" ]; then
+          echo Removed directory: $path
+        else
+          echo Removed file: $path
+        fi
+      fi
+    done < $LOGFILE.remove
+   
+    if [ -e $LOGFILE.remove.tmp ]; then
+      mv $LOGFILE.remove.tmp $LOGFILE.remove
+    fi
+
+    if [ -e $TYPESFILE.tmp ]; then
+      mv $TYPESFILE.tmp $TYPESFILE
+    fi
+
+    sleep $SLEEP
+  done
 }
 
 trap "exit_process" SIGINT SIGTERM
 
 echo Running
 
-find $1 > $LOGFILE
-find $1 -exec file -b {} \; > $LOGFILE.types
+add $1 &
+remove $1 &
 
-while true; do
-  STATUS=`find $1`
-  TYPES=`find $1 -exec file -b {} \;`
-
-  for $path in $STATUS; do
-    if ! grep -qxF "$path" $LOGFILE; then
-      if [ -f $path ]; then
-        echo New directory: $path
-      else
-        echo New file: $path
-      fi
-    fi
-
-    echo $path >> $LOGFILE.tmp
-  done
-
-  #for path in `cat $LOGFILE`; do
-  #  if ! grep -qxF "$path" $LOGFILE.tmp; then
-  #    if [ -f $path ]; then
-  #      echo Removed file: $path
-  #    else
-  #      echo Removed directory: $path
-  #    fi
-  #  fi
-  #done
- 
-  mv $LOGFILE.tmp $LOGFILE
-
-  sleep 2
+for job in $(jobs -p); do
+  wait $job
 done
